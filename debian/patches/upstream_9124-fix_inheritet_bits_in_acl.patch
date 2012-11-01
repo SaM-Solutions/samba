@@ -1,0 +1,388 @@
+From 52d1aafc5cec870a2caaa9600cae80f3db00d05c Mon Sep 17 00:00:00 2001
+From: Jeremy Allison <jra@samba.org>
+Date: Wed, 29 Aug 2012 13:23:06 -0700
+Subject: [PATCH 1/5] Rename set_sd() to set_sd_blob() - this describes what
+ it does. (cherry picked from commit
+ 61957ff9f6124eabae050f5425d7d0597ae6a127)
+
+---
+ source3/smbd/nttrans.c      |    8 ++++----
+ source3/smbd/proto.h        |    2 +-
+ source3/smbd/smb2_setinfo.c |    2 +-
+ 3 files changed, 6 insertions(+), 6 deletions(-)
+
+diff --git a/source3/smbd/nttrans.c b/source3/smbd/nttrans.c
+index e87d132..7fb22e3 100644
+--- a/source3/smbd/nttrans.c
++++ b/source3/smbd/nttrans.c
+@@ -827,10 +827,10 @@ static void do_nt_transact_create_pipe(connection_struct *conn,
+ }
+ 
+ /****************************************************************************
+- Internal fn to set security descriptors.
++ Internal fn to set security descriptors from a data blob.
+ ****************************************************************************/
+ 
+-NTSTATUS set_sd(files_struct *fsp, uint8_t *data, uint32_t sd_len,
++NTSTATUS set_sd_blob(files_struct *fsp, uint8_t *data, uint32_t sd_len,
+ 		       uint32_t security_info_sent)
+ {
+ 	struct security_descriptor *psd = NULL;
+@@ -906,7 +906,7 @@ NTSTATUS set_sd(files_struct *fsp, uint8_t *data, uint32_t sd_len,
+ 	}
+ 
+ 	if (DEBUGLEVEL >= 10) {
+-		DEBUG(10,("set_sd for file %s\n", fsp_str_dbg(fsp)));
++		DEBUG(10,("set_sd_blob for file %s\n", fsp_str_dbg(fsp)));
+ 		NDR_PRINT_DEBUG(security_descriptor, psd);
+ 	}
+ 
+@@ -2095,7 +2095,7 @@ static void call_nt_transact_set_security_desc(connection_struct *conn,
+ 		return;
+ 	}
+ 
+-	status = set_sd(fsp, (uint8 *)data, data_count, security_info_sent);
++	status = set_sd_blob(fsp, (uint8 *)data, data_count, security_info_sent);
+ 
+ 	if (!NT_STATUS_IS_OK(status)) {
+ 		reply_nterror(req, status);
+diff --git a/source3/smbd/proto.h b/source3/smbd/proto.h
+index d75138b..9224ce7 100644
+--- a/source3/smbd/proto.h
++++ b/source3/smbd/proto.h
+@@ -561,7 +561,7 @@ void send_nt_replies(connection_struct *conn,
+ 		     char *params, int paramsize,
+ 		     char *pdata, int datasize);
+ void reply_ntcreate_and_X(struct smb_request *req);
+-NTSTATUS set_sd(files_struct *fsp, uint8_t *data, uint32_t sd_len,
++NTSTATUS set_sd_blob(files_struct *fsp, uint8_t *data, uint32_t sd_len,
+                        uint32_t security_info_sent);
+ NTSTATUS smb_fsctl(struct files_struct *fsp,
+ 		       TALLOC_CTX *ctx,
+diff --git a/source3/smbd/smb2_setinfo.c b/source3/smbd/smb2_setinfo.c
+index ba91466..d97caa4 100644
+--- a/source3/smbd/smb2_setinfo.c
++++ b/source3/smbd/smb2_setinfo.c
+@@ -298,7 +298,7 @@ static struct tevent_req *smbd_smb2_setinfo_send(TALLOC_CTX *mem_ctx,
+ 			return tevent_req_post(req, ev);
+ 		}
+ 
+-		status = set_sd(fsp,
++		status = set_sd_blob(fsp,
+ 				in_input_buffer.data,
+ 				in_input_buffer.length,
+ 				in_additional_information);
+-- 
+1.7.7.3
+
+
+From 3c355832961d58fc9c0f206fa30f90570d885504 Mon Sep 17 00:00:00 2001
+From: Jeremy Allison <jra@samba.org>
+Date: Wed, 29 Aug 2012 13:29:34 -0700
+Subject: [PATCH 2/5] Re-add set_sd(), called from set_sd_blob(). Allows us to
+ centralize all ACL canonicalization. (cherry picked
+ from commit 05734b67b8ed5516d81000eac48acd0915567629)
+
+---
+ source3/smbd/nttrans.c |   40 ++++++++++++++++++++++++++--------------
+ source3/smbd/proto.h   |    2 ++
+ 2 files changed, 28 insertions(+), 14 deletions(-)
+
+diff --git a/source3/smbd/nttrans.c b/source3/smbd/nttrans.c
+index 7fb22e3..f66285d 100644
+--- a/source3/smbd/nttrans.c
++++ b/source3/smbd/nttrans.c
+@@ -827,19 +827,14 @@ static void do_nt_transact_create_pipe(connection_struct *conn,
+ }
+ 
+ /****************************************************************************
+- Internal fn to set security descriptors from a data blob.
++ Internal fn to set security descriptors.
+ ****************************************************************************/
+ 
+-NTSTATUS set_sd_blob(files_struct *fsp, uint8_t *data, uint32_t sd_len,
++NTSTATUS set_sd(files_struct *fsp, struct security_descriptor *psd,
+ 		       uint32_t security_info_sent)
+ {
+-	struct security_descriptor *psd = NULL;
+ 	NTSTATUS status;
+ 
+-	if (sd_len == 0) {
+-		return NT_STATUS_INVALID_PARAMETER;
+-	}
+-
+ 	if (!CAN_WRITE(fsp->conn)) {
+ 		return NT_STATUS_ACCESS_DENIED;
+ 	}
+@@ -848,12 +843,6 @@ NTSTATUS set_sd_blob(files_struct *fsp, uint8_t *data, uint32_t sd_len,
+ 		return NT_STATUS_OK;
+ 	}
+ 
+-	status = unmarshall_sec_desc(talloc_tos(), data, sd_len, &psd);
+-
+-	if (!NT_STATUS_IS_OK(status)) {
+-		return status;
+-	}
+-
+ 	if (psd->owner_sid == NULL) {
+ 		security_info_sent &= ~SECINFO_OWNER;
+ 	}
+@@ -906,7 +895,7 @@ NTSTATUS set_sd_blob(files_struct *fsp, uint8_t *data, uint32_t sd_len,
+ 	}
+ 
+ 	if (DEBUGLEVEL >= 10) {
+-		DEBUG(10,("set_sd_blob for file %s\n", fsp_str_dbg(fsp)));
++		DEBUG(10,("set_sd for file %s\n", fsp_str_dbg(fsp)));
+ 		NDR_PRINT_DEBUG(security_descriptor, psd);
+ 	}
+ 
+@@ -918,6 +907,29 @@ NTSTATUS set_sd_blob(files_struct *fsp, uint8_t *data, uint32_t sd_len,
+ }
+ 
+ /****************************************************************************
++ Internal fn to set security descriptors from a data blob.
++****************************************************************************/
++
++NTSTATUS set_sd_blob(files_struct *fsp, uint8_t *data, uint32_t sd_len,
++		       uint32_t security_info_sent)
++{
++	struct security_descriptor *psd = NULL;
++	NTSTATUS status;
++
++	if (sd_len == 0) {
++		return NT_STATUS_INVALID_PARAMETER;
++	}
++
++	status = unmarshall_sec_desc(talloc_tos(), data, sd_len, &psd);
++
++	if (!NT_STATUS_IS_OK(status)) {
++		return status;
++	}
++
++	return set_sd(fsp, psd, security_info_sent);
++}
++
++/****************************************************************************
+  Read a list of EA names and data from an incoming data buffer. Create an ea_list with them.
+ ****************************************************************************/
+ 
+diff --git a/source3/smbd/proto.h b/source3/smbd/proto.h
+index 9224ce7..e80e01e 100644
+--- a/source3/smbd/proto.h
++++ b/source3/smbd/proto.h
+@@ -561,6 +561,8 @@ void send_nt_replies(connection_struct *conn,
+ 		     char *params, int paramsize,
+ 		     char *pdata, int datasize);
+ void reply_ntcreate_and_X(struct smb_request *req);
++NTSTATUS set_sd(files_struct *fsp, struct security_descriptor *psd,
++                       uint32_t security_info_sent);
+ NTSTATUS set_sd_blob(files_struct *fsp, uint8_t *data, uint32_t sd_len,
+                        uint32_t security_info_sent);
+ NTSTATUS smb_fsctl(struct files_struct *fsp,
+-- 
+1.7.7.3
+
+
+From aa0428de71933f6f5af2bcb398cc3f87951b0704 Mon Sep 17 00:00:00 2001
+From: Jeremy Allison <jra@samba.org>
+Date: Wed, 29 Aug 2012 16:52:02 -0700
+Subject: [PATCH 3/5] Change the other two places where we set a security
+ descriptor given by the client to got through set_sd(),
+ the canonicalize sd function.
+
+---
+ source3/rpc_server/srvsvc/srv_srvsvc_nt.c |   21 +--------------------
+ source3/smbd/open.c                       |    6 +-----
+ 2 files changed, 2 insertions(+), 25 deletions(-)
+
+diff --git a/source3/rpc_server/srvsvc/srv_srvsvc_nt.c b/source3/rpc_server/srvsvc/srv_srvsvc_nt.c
+index a078395..b9345d6 100644
+--- a/source3/rpc_server/srvsvc/srv_srvsvc_nt.c
++++ b/source3/rpc_server/srvsvc/srv_srvsvc_nt.c
+@@ -2318,26 +2318,7 @@ WERROR _srvsvc_NetSetFileSecurity(struct pipes_struct *p,
+ 	psd = r->in.sd_buf->sd;
+ 	security_info_sent = r->in.securityinformation;
+ 
+-	if (psd->owner_sid==0) {
+-		security_info_sent &= ~SECINFO_OWNER;
+-	}
+-	if (psd->group_sid==0) {
+-		security_info_sent &= ~SECINFO_GROUP;
+-	}
+-	if (psd->sacl==0) {
+-		security_info_sent &= ~SECINFO_SACL;
+-	}
+-	if (psd->dacl==0) {
+-		security_info_sent &= ~SECINFO_DACL;
+-	}
+-
+-	/* Convert all the generic bits. */
+-	security_acl_map_generic(psd->dacl, &file_generic_mapping);
+-	security_acl_map_generic(psd->sacl, &file_generic_mapping);
+-
+-	nt_status = SMB_VFS_FSET_NT_ACL(fsp,
+-					security_info_sent,
+-					psd);
++	nt_status = set_sd(fsp, psd, security_info_sent);
+ 
+ 	if (!NT_STATUS_IS_OK(nt_status) ) {
+ 		DEBUG(3,("_srvsvc_NetSetFileSecurity: Unable to set NT ACL "
+diff --git a/source3/smbd/open.c b/source3/smbd/open.c
+index 72b7d8e..3100ad0 100644
+--- a/source3/smbd/open.c
++++ b/source3/smbd/open.c
+@@ -3363,15 +3363,11 @@ static NTSTATUS create_file_unixpath(connection_struct *conn,
+ 
+ 		fsp->access_mask = FILE_GENERIC_ALL;
+ 
+-		/* Convert all the generic bits. */
+-		security_acl_map_generic(sd->dacl, &file_generic_mapping);
+-		security_acl_map_generic(sd->sacl, &file_generic_mapping);
+-
+ 		if (sec_info_sent & (SECINFO_OWNER|
+ 					SECINFO_GROUP|
+ 					SECINFO_DACL|
+ 					SECINFO_SACL)) {
+-			status = SMB_VFS_FSET_NT_ACL(fsp, sec_info_sent, sd);
++			status = set_sd(fsp, sd, sec_info_sent);
+ 		}
+ 
+ 		fsp->access_mask = saved_access_mask;
+-- 
+1.7.7.3
+
+
+From 1ca6bc246872529aee848c1625b1c8521e9f8011 Mon Sep 17 00:00:00 2001
+From: Jeremy Allison <jra@samba.org>
+Date: Wed, 29 Aug 2012 13:40:29 -0700
+Subject: [PATCH 4/5] Windows does canonicalization of inheritance bits. Do
+ the same.
+
+We need to filter out the
+SEC_DESC_DACL_AUTO_INHERITED|SEC_DESC_DACL_AUTO_INHERIT_REQ
+bits. If both are set we store SEC_DESC_DACL_AUTO_INHERITED
+as this alters whether SEC_ACE_FLAG_INHERITED_ACE is set
+when an ACE is inherited. Otherwise we zero these bits out.
+See:
+
+http://social.msdn.microsoft.com/Forums/eu/os_fileservices/thread/11f77b68-731e-407d-b1b3-064750716531
+
+for details.
+(cherry picked from commit d02f39f97624260bd226977b30c80974d0ce0fe0)
+---
+ source3/smbd/nttrans.c |   35 +++++++++++++++++++++++++++++++++++
+ 1 files changed, 35 insertions(+), 0 deletions(-)
+
+diff --git a/source3/smbd/nttrans.c b/source3/smbd/nttrans.c
+index f66285d..ea9d417 100644
+--- a/source3/smbd/nttrans.c
++++ b/source3/smbd/nttrans.c
+@@ -826,6 +826,39 @@ static void do_nt_transact_create_pipe(connection_struct *conn,
+ 	return;
+ }
+ 
++/*********************************************************************
++ Windows seems to do canonicalization of inheritance bits. Do the
++ same.
++*********************************************************************/
++
++static void canonicalize_inheritance_bits(struct security_descriptor *psd)
++{
++	bool set_auto_inherited = false;
++
++	/*
++	 * We need to filter out the
++	 * SEC_DESC_DACL_AUTO_INHERITED|SEC_DESC_DACL_AUTO_INHERIT_REQ
++	 * bits. If both are set we store SEC_DESC_DACL_AUTO_INHERITED
++	 * as this alters whether SEC_ACE_FLAG_INHERITED_ACE is set
++	 * when an ACE is inherited. Otherwise we zero these bits out.
++	 * See:
++	 *
++	 * http://social.msdn.microsoft.com/Forums/eu/os_fileservices/thread/11f77b68-731e-407d-b1b3-064750716531
++	 *
++	 * for details.
++	 */
++
++	if ((psd->type & (SEC_DESC_DACL_AUTO_INHERITED|SEC_DESC_DACL_AUTO_INHERIT_REQ))
++			== (SEC_DESC_DACL_AUTO_INHERITED|SEC_DESC_DACL_AUTO_INHERIT_REQ)) {
++		set_auto_inherited = true;
++	}
++
++	psd->type &= ~(SEC_DESC_DACL_AUTO_INHERITED|SEC_DESC_DACL_AUTO_INHERIT_REQ);
++	if (set_auto_inherited) {
++		psd->type |= SEC_DESC_DACL_AUTO_INHERITED;
++	}
++}
++
+ /****************************************************************************
+  Internal fn to set security descriptors.
+ ****************************************************************************/
+@@ -894,6 +927,8 @@ NTSTATUS set_sd(files_struct *fsp, struct security_descriptor *psd,
+ 		}
+ 	}
+ 
++	canonicalize_inheritance_bits(psd);
++
+ 	if (DEBUGLEVEL >= 10) {
+ 		DEBUG(10,("set_sd for file %s\n", fsp_str_dbg(fsp)));
+ 		NDR_PRINT_DEBUG(security_descriptor, psd);
+-- 
+1.7.7.3
+
+
+From fcf48a31d49364f3191fdf0a71eacddf088b198e Mon Sep 17 00:00:00 2001
+From: Jeremy Allison <jra@samba.org>
+Date: Wed, 29 Aug 2012 16:55:21 -0700
+Subject: [PATCH 5/5] Fix bug #9124 - Samba fails to set "inherited" bit on
+ inherited ACE's.
+
+Change se_create_child_secdesc() to handle inheritance correctly.
+---
+ source3/lib/secdesc.c |   10 +++++++---
+ 1 files changed, 7 insertions(+), 3 deletions(-)
+
+diff --git a/source3/lib/secdesc.c b/source3/lib/secdesc.c
+index 007e097..fd3b1a7 100644
+--- a/source3/lib/secdesc.c
++++ b/source3/lib/secdesc.c
+@@ -563,6 +563,7 @@ NTSTATUS se_create_child_secdesc(TALLOC_CTX *ctx,
+ 	struct security_acl *new_dacl = NULL, *the_acl = NULL;
+ 	struct security_ace *new_ace_list = NULL;
+ 	unsigned int new_ace_list_ndx = 0, i;
++	bool set_inherited_flags = (parent_ctr->type & SEC_DESC_DACL_AUTO_INHERITED);
+ 
+ 	*ppsd = NULL;
+ 	*psize = 0;
+@@ -625,7 +626,8 @@ NTSTATUS se_create_child_secdesc(TALLOC_CTX *ctx,
+ 
+ 			/* First add the regular ACE entry. */
+ 			init_sec_ace(new_ace, ptrustee, ace->type,
+-			     	ace->access_mask, 0);
++			     	ace->access_mask,
++				set_inherited_flags ? SEC_ACE_FLAG_INHERITED_ACE : 0);
+ 
+ 			DEBUG(5,("se_create_child_secdesc(): %s:%d/0x%02x/0x%08x"
+ 				" inherited as %s:%d/0x%02x/0x%08x\n",
+@@ -648,7 +650,8 @@ NTSTATUS se_create_child_secdesc(TALLOC_CTX *ctx,
+ 		}
+ 
+ 		init_sec_ace(new_ace, ptrustee, ace->type,
+-			     ace->access_mask, new_flags);
++				ace->access_mask, new_flags |
++				(set_inherited_flags ? SEC_ACE_FLAG_INHERITED_ACE : 0));
+ 
+ 		DEBUG(5, ("se_create_child_secdesc(): %s:%d/0x%02x/0x%08x "
+ 			  " inherited as %s:%d/0x%02x/0x%08x\n",
+@@ -675,7 +678,8 @@ NTSTATUS se_create_child_secdesc(TALLOC_CTX *ctx,
+ 
+ 	*ppsd = make_sec_desc(ctx,
+ 			SECURITY_DESCRIPTOR_REVISION_1,
+-			SEC_DESC_SELF_RELATIVE|SEC_DESC_DACL_PRESENT,
++			SEC_DESC_SELF_RELATIVE|SEC_DESC_DACL_PRESENT|
++			(set_inherited_flags ? SEC_DESC_DACL_AUTO_INHERITED : 0),
+ 			owner_sid,
+ 			group_sid,
+ 			NULL,
+-- 
+1.7.7.3
+
