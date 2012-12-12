@@ -1,4 +1,3 @@
-upstream_9124-fix_inheritet_bits_in_acl.patch
 documentation.patch
 documentation2.patch
 fhs-filespaths.patch
@@ -22,3 +21,4 @@ smbtorture-manpage.patch
 libutil_drop_AI_ADDRCONFIG.patch
 shadow_copy2_backport.patch
 only_export_public_symbols.patch
+upstream_9124-fix_inheritet_bits_in_acl.patch
