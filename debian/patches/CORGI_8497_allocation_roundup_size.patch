@@ -1,0 +1,21 @@
+Description: Fixes issue with allocation roundup size not being considered base the initial allocation
+Author: Scott Hallowell <scotth@trellis-logic.com>
+Forwarded: not-needed
+
+Index: samba/source3/modules/vfs_default.c
+===================================================================
+--- samba.orig/source3/modules/vfs_default.c
++++ samba/source3/modules/vfs_default.c
+@@ -608,7 +608,11 @@
+ 		goto out;
+ 	}
+ 
+-#if defined(HAVE_STAT_ST_BLOCKS) && defined(STAT_ST_BLOCKSIZE)
++// seh 4-6-13 Attempt to use get_file_size_stat to see if that will
++// fix my issue with allocation_roundup_size not appearing to do what
++// I want on anything but the initial allocation
++#undef USE_ST_BLOCKS
++#if defined(USE_ST_BLOCKS) && defined(HAVE_STAT_ST_BLOCKS) && defined(STAT_ST_BLOCKSIZE)
+ 	result = (uint64_t)STAT_ST_BLOCKSIZE * (uint64_t)sbuf->st_ex_blocks;
+ #else
+ 	result = get_file_size_stat(sbuf);
