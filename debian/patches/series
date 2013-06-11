@@ -26,3 +26,4 @@ security-CVE-2013-0213.patch
 security-CVE-2013-0214.patch
 upstream_9124-fix_inheritet_bits_in_acl.patch
 CORGI_8497_allocation_roundup_size.patch
+no_default_creator_group.patch

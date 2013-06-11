@@ -1,0 +1,98 @@
+--- samba-3.6.9/source3/modules/vfs_acl_common.c.orig	2013-05-28 07:22:55.886909195 -0700
++++ samba-3.6.9/source3/modules/vfs_acl_common.c	2013-06-08 07:06:06.396858142 -0700
+@@ -179,9 +179,19 @@ static NTSTATUS add_directory_inheritabl
+ 	mode_t dir_mode;
+ 	mode_t file_mode;
+ 	mode_t mode;
++	int ace_num = 0;
++	bool add_creator_group = lp_parm_bool(SNUM(handle->conn),
++					      ACL_MODULE_NAME,
++					      "add creator group",
++					      true);
++	/*
++	 * One ACE for everyone, one for CREATOR OWNER and one for 
++	 * CREATOR GROUP if allowed.
++	 */
++	int extra_aces = 1 + 1 + (add_creator_group ? 1 : 0);
+ 	struct security_ace *new_ace_list = TALLOC_ZERO_ARRAY(talloc_tos(),
+ 						struct security_ace,
+-						num_aces + 3);
++						num_aces + extra_aces);
+ 
+ 	if (new_ace_list == NULL) {
+ 		return NT_STATUS_NO_MEMORY;
+@@ -211,38 +221,47 @@ static NTSTATUS add_directory_inheritabl
+ 	access_mask = map_canon_ace_perms(SNUM(conn), &acltype,
+ 				mode & 0700, false);
+ 
+-	init_sec_ace(&new_ace_list[num_aces],
++	init_sec_ace(&new_ace_list[num_aces + ace_num],
+ 			&global_sid_Creator_Owner,
+ 			acltype,
+ 			access_mask,
+ 			SEC_ACE_FLAG_CONTAINER_INHERIT|
+ 				SEC_ACE_FLAG_OBJECT_INHERIT|
+ 				SEC_ACE_FLAG_INHERIT_ONLY);
++	ace_num++;
++
+ 	access_mask = map_canon_ace_perms(SNUM(conn), &acltype,
+ 				(mode << 3) & 0700, false);
+-	init_sec_ace(&new_ace_list[num_aces+1],
+-			&global_sid_Creator_Group,
+-			acltype,
+-			access_mask,
+-			SEC_ACE_FLAG_CONTAINER_INHERIT|
+-				SEC_ACE_FLAG_OBJECT_INHERIT|
+-				SEC_ACE_FLAG_INHERIT_ONLY);
++	if (add_creator_group) {
++		init_sec_ace(&new_ace_list[num_aces + ace_num],
++				&global_sid_Creator_Group,
++				acltype,
++				access_mask,
++				SEC_ACE_FLAG_CONTAINER_INHERIT|
++					SEC_ACE_FLAG_OBJECT_INHERIT|
++					SEC_ACE_FLAG_INHERIT_ONLY);
++		ace_num++;
++	}
++
+ 	access_mask = map_canon_ace_perms(SNUM(conn), &acltype,
+ 				(mode << 6) & 0700, false);
+-	init_sec_ace(&new_ace_list[num_aces+2],
++	init_sec_ace(&new_ace_list[num_aces + ace_num],
+ 			&global_sid_World,
+ 			acltype,
+ 			access_mask,
+ 			SEC_ACE_FLAG_CONTAINER_INHERIT|
+ 				SEC_ACE_FLAG_OBJECT_INHERIT|
+ 				SEC_ACE_FLAG_INHERIT_ONLY);
++
++	ace_num++; /* It's now a count of the aces added */
++
+ 	if (psd->dacl) {
+ 		psd->dacl->aces = new_ace_list;
+-		psd->dacl->num_aces += 3;
++		psd->dacl->num_aces += ace_num;
+ 	} else {
+ 		psd->dacl = make_sec_acl(talloc_tos(),
+ 				NT4_ACL_REVISION,
+-				3,
++				ace_num,
+ 				new_ace_list);
+ 		if (psd->dacl == NULL) {
+ 			return NT_STATUS_NO_MEMORY;
+@@ -614,7 +633,6 @@ static int open_acl_common(vfs_handle_st
+ {
+ 	uint32_t access_granted = 0;
+ 	struct security_descriptor *pdesc = NULL;
+-	bool file_existed = true;
+ 	char *fname = NULL;
+ 	NTSTATUS status;
+ 
+@@ -672,7 +690,6 @@ static int open_acl_common(vfs_handle_st
+ 			goto err;
+ 		}
+         } else if (NT_STATUS_EQUAL(status,NT_STATUS_OBJECT_NAME_NOT_FOUND)) {
+-		file_existed = false;
+ 		/*
+ 		 * If O_CREAT is true then we're trying to create a file.
+ 		 * Check the parent directory ACL will allow this.
