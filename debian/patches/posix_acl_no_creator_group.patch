@@ -1,0 +1,37 @@
+diff --git a/source3/smbd/posix_acls.c b/source3/smbd/posix_acls.c
+index 34747d3..9beeb4e 100644
+--- a/source3/smbd/posix_acls.c
++++ b/source3/smbd/posix_acls.c
+@@ -2447,6 +2447,11 @@ static canon_ace *canonicalise_acl(struct connection_struct *conn,
+ 		if (SMB_VFS_SYS_ACL_GET_PERMSET(conn, entry, &permset) == -1)
+ 			continue;
+ 
++		if (tagtype == SMB_ACL_GROUP_OBJ) {
++			DEBUG(10, ("Skipping CREATOR GROUP ACE\n"));
++			continue;
++		}
++
+ 		/* Decide which SID to use based on the ACL type. */
+ 		switch(tagtype) {
+ 			case SMB_ACL_USER_OBJ:
+@@ -2504,7 +2509,6 @@ static canon_ace *canonicalise_acl(struct connection_struct *conn,
+ 		/*
+ 		 * Add this entry to the list.
+ 		 */
+-
+ 		if ((ace = SMB_MALLOC_P(canon_ace)) == NULL)
+ 			goto fail;
+ 
+@@ -2524,10 +2528,12 @@ static canon_ace *canonicalise_acl(struct connection_struct *conn,
+ 	 * This next call will ensure we have at least a user/group/world set.
+ 	 */
+ 
++#if 0
+ 	if (!ensure_canon_entry_valid(conn, &l_head, conn->params,
+ 				      S_ISDIR(psbuf->st_ex_mode), powner, pgroup,
+ 				      psbuf, False))
+ 		goto fail;
++#endif
+ 
+ 	/*
+ 	 * Now go through the list, masking the permissions with the
