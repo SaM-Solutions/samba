@@ -1,3 +1,9 @@
+samba (2:3.6.6-6.5) unstable; urgency=high
+
+  * Added patch to make permission changes apply instantly rather than requiring the user to disconnect from the share
+
+ -- Aliaksei Tulia <a.tulia@sam-solutions.com>  Tue, 13 Aug 2013 14:42:10 +0300
+
 samba (2:3.6.6-6.4) unstable; urgency=high
 
   * Added patch to eliminate 'Creator Group' ACE from share and sub folders
