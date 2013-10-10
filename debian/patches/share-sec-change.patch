@@ -1,0 +1,293 @@
+--- samba-3.6.9/source3/librpc/idl/messaging.idl	2012-10-29 02:05:46.000000000 -0700
++++ tbg-samba-3.6.9/source3/librpc/idl/messaging.idl	2013-09-09 21:46:58.891147642 -0700
+@@ -80,6 +80,9 @@
+ 		/*Close a specific file given a share entry. */
+ 		MSG_SMB_CLOSE_FILE		= 0x0313,
+ 
++		/* Extra stuff                               */
++		MSG_SMB_SHARE_SEC_CHANGED	= 0x0320,
++
+ 		/* winbind messages */
+ 		MSG_WINBIND_FINISHED		= 0x0401,
+ 		MSG_WINBIND_FORGET_STATE	= 0x0402,
+--- samba-3.6.9/source3/rpc_server/srvsvc/srv_srvsvc_nt.c	2012-10-29 02:05:46.000000000 -0700
++++ tbg-samba-3.6.9/source3/rpc_server/srvsvc/srv_srvsvc_nt.c	2013-09-05 21:41:51.195825205 -0700
+@@ -1732,6 +1732,12 @@
+ 			if (!set_share_security(share_name, psd))
+ 				DEBUG(0,("_srvsvc_NetShareSetInfo: Failed to change security info in share %s.\n",
+ 					share_name ));
++			else 
++				message_send_all(smbd_messaging_context(),
++					 MSG_SMB_SHARE_SEC_CHANGED,
++					 share_name,
++			 		 strlen(share_name),
++			 		 NULL);
+ 		}
+ 	}
+ 
+@@ -1915,6 +1921,12 @@
+ 			DEBUG(0,("_srvsvc_NetShareAdd: Failed to add security info to share %s.\n",
+ 				share_name ));
+ 		}
++		else	
++			message_send_all(smbd_messaging_context(),
++					 MSG_SMB_SHARE_SEC_CHANGED,
++					 share_name,
++			 		 strlen(share_name),
++			 		 NULL);
+ 	}
+ 
+ 	/*
+--- samba-3.6.9/source3/smbd/proto.h	2012-10-29 02:05:46.000000000 -0700
++++ tbg-samba-3.6.9/source3/smbd/proto.h	2013-09-04 07:11:16.402473133 -0700
+@@ -992,6 +992,7 @@
+ 
+ bool set_conn_connectpath(connection_struct *conn, const char *connectpath);
+ NTSTATUS set_conn_force_user_group(connection_struct *conn, int snum);
++void create_share_access_mask(connection_struct *conn, int snum);
+ bool set_current_service(connection_struct *conn, uint16 flags, bool do_chdir);
+ void load_registry_shares(void);
+ int add_home_service(const char *service, const char *username, const char *homedir);
+--- samba-3.6.9/source3/lib/sharesec.c	2012-10-29 02:05:46.000000000 -0700
++++ tbg-samba-3.6.9/source3/lib/sharesec.c	2013-09-05 21:37:24.614967700 -0700
+@@ -21,6 +21,7 @@
+ #include "system/filesys.h"
+ #include "../libcli/security/security.h"
+ #include "../librpc/gen_ndr/ndr_security.h"
++#include "../librpc/gen_ndr/messaging.h"
+ #include "dbwrap.h"
+ #include "util_tdb.h"
+ 
+--- samba-3.6.9/source3/smbd/service.c	2012-10-29 02:05:46.000000000 -0700
++++ tbg-samba-3.6.9/source3/smbd/service.c	2013-09-04 07:09:12.014405465 -0700
+@@ -743,7 +743,7 @@
+   Setup the share access mask for a connection.
+ ****************************************************************************/
+ 
+-static void create_share_access_mask(connection_struct *conn, int snum)
++void create_share_access_mask(connection_struct *conn, int snum)
+ {
+ 	const struct security_token *token = conn->session_info->security_token;
+ 
+--- samba-3.6.9/source3/smbd/server.c	2012-10-29 02:05:46.000000000 -0700
++++ tbg-samba-3.6.9/source3/smbd/server.c	2013-09-18 08:00:24.663032082 -0700
+@@ -28,6 +28,7 @@
+ #include "smbd/globals.h"
+ #include "registry/reg_init_full.h"
+ #include "libcli/auth/schannel.h"
++#include "libcli/security/security.h"
+ #include "secrets.h"
+ #include "memcache.h"
+ #include "ctdbd_conn.h"
+@@ -156,6 +157,184 @@
+ 	if(am_parent) kill(0,SIGTERM);
+ }
+ 
++/*
++ * Process a share_security_changed message.
++ */
++static void reset_read_only(connection_struct *conn)
++{
++	struct vuid_cache_entry *ent;
++	user_struct *vuser;
++	const struct auth_serversupplied_info *session_info = NULL;
++	int i = 0;
++	bool saved_flag;
++
++	/*
++	 * Set READ_ONLY off so that is_share_read_only_for_token works.
++	 */
++	saved_flag = conn->read_only;  /* Need to save this though */
++	conn->read_only = false; 
++
++	/*
++	 * For each vuid check if it should be RO ... this gets jammed into
++	 * the conn read_only flag when we switch to that user.
++	 */
++	for (i = 0; i < VUID_CACHE_SIZE; i++) {
++		bool read_only = false;
++
++		if (conn->vuid_cache.array[i].vuid == UID_FIELD_INVALID)
++			continue;
++
++		vuser = get_valid_user_struct(conn->sconn,
++					      conn->vuid_cache.array[i].vuid);
++		session_info = vuser ? vuser->session_info : conn->session_info;
++
++		read_only = is_share_read_only_for_token(
++					session_info->unix_name,
++					session_info->info3->base.domain.string,
++					session_info->security_token,
++					conn);
++		if (!read_only &&
++		    !share_access_check(session_info->security_token,
++					lp_servicename(conn->params->service),
++					FILE_WRITE_DATA,
++					NULL))
++			read_only = true;
++
++		conn->vuid_cache.array[i].read_only = read_only;
++		DEBUG(10, ("Set share for %s to RO = %d\n", 
++			session_info->unix_name, read_only));
++	}
++
++	conn->read_only = saved_flag;
++}
++
++static void smb_share_security_changed(struct messaging_context *msg,
++				       void *private_data,
++				       uint32_t msg_type,
++				       struct server_id server_id,
++				       DATA_BLOB *data)
++{
++	char *sharename = talloc_memdup(talloc_tos(), data->data, data->length + 1);
++	int snum = -1;
++	struct smbd_server_connection *sconn = smbd_server_conn;
++
++	sharename[data->length] = 0;
++
++	snum = lp_servicenumber(sharename);
++
++	DEBUG(10, ("** smb share security changed received for %s, %u\n", 
++		sharename, snum));
++
++	if (snum < 0) {
++		DEBUG(10, ("Share %s not found, perhaps removed\n", sharename));
++		TALLOC_FREE(sharename);
++		return;
++	}
++       
++	/*
++	 * Find the share that this represents, if any, and recreate its
++	 * share access mask.
++	 *
++	 * Access to the connection struct is from different places depending
++	 * on using_smb2
++	 */
++        
++	if (sconn->using_smb2) {
++		struct smbd_smb2_session *session = NULL;
++
++		for (session = sconn->smb2.sessions.list;
++		     session != NULL;
++		     session = session->next) {
++			struct smbd_smb2_tcon *smb2_tcon = NULL;
++
++			for (smb2_tcon = session->tcons.list;
++			     smb2_tcon != NULL;
++			     smb2_tcon = smb2_tcon->next) {
++				if (smb2_tcon->snum == snum) {
++					DEBUG(10, ("Share %s before access 0x%0x\n",
++						sharename,
++						smb2_tcon->compat_conn->share_access));
++					create_share_access_mask(smb2_tcon->compat_conn, snum);
++					/*
++					 * It should not be read only since
++					 * We are using share-level perms.
++					 */
++					reset_read_only(smb2_tcon->compat_conn);
++					DEBUG(10, ("Share %s after access 0x%0x, %p\n",
++						sharename,
++						smb2_tcon->compat_conn->share_access, smb2_tcon->compat_conn));
++				}
++			}
++
++		}
++	}
++	else {
++		struct connection_struct *conn = NULL;
++		for (conn = sconn->smb1.tcons.Connections;
++		     conn != NULL;
++		     conn = conn->next) {
++			if (conn->params->service == snum) {
++				DEBUG(10, ("Share %s before access 0x%0x\n",
++					sharename,
++					conn->share_access));
++				create_share_access_mask(conn, snum);
++				/*
++				 * It should not be read only since
++				 * We are using share-level perms.
++				 */
++				reset_read_only(conn);
++				DEBUG(10, ("Share %s after access 0x%0x, %d, %p\n",
++					sharename,
++					conn->share_access, conn->read_only, conn));
++			}
++		}
++	}
++
++	TALLOC_FREE(sharename);
++}
++
++/*
++ * Designed to be called from the sighup handler ... iterate through the shares
++ * and call reset_read_only on them.
++ */
++void reset_ro_all_shares(void)
++{
++	struct smbd_server_connection *sconn = smbd_server_conn;
++
++	if (sconn->using_smb2) {
++		struct smbd_smb2_session *session = NULL;
++
++		for (session = sconn->smb2.sessions.list;
++		     session != NULL;
++		     session = session->next) {
++			struct smbd_smb2_tcon *smb2_tcon = NULL;
++
++			for (smb2_tcon = session->tcons.list;
++			     smb2_tcon != NULL;
++			     smb2_tcon = smb2_tcon->next) {
++				/*
++				 * It should not be read only since
++				 * We are using share-level perms.
++				 */
++				reset_read_only(smb2_tcon->compat_conn);
++			}
++
++		}
++	}
++	else {
++		struct connection_struct *conn = NULL;
++		for (conn = sconn->smb1.tcons.Connections;
++		     conn != NULL;
++		     conn = conn->next) {
++			/*
++			 * It should not be read only since
++			 * We are using share-level perms.
++			 */
++			reset_read_only(conn);
++		}
++	}
++}
++
+ /****************************************************************************
+  Process a sam sync message - not sure whether to do this here or
+  somewhere else.
+@@ -774,6 +957,8 @@
+ 	messaging_register(msg_ctx, NULL, MSG_DEBUG, smbd_msg_debug);
+ 	messaging_register(msg_ctx, server_event_context(), MSG_PRINTER_PCAP,
+ 			   smb_pcap_updated);
++	messaging_register(msg_ctx, NULL, MSG_SMB_SHARE_SEC_CHANGED,
++			   smb_share_security_changed);
+ 	brl_register_msgs(msg_ctx);
+ 
+ 	msg_idmap_register_msgs(msg_ctx);
+--- samba-3.6.9/source3/smbd/process.c	2012-10-29 02:05:46.000000000 -0700
++++ tbg-samba-3.6.9/source3/smbd/process.c	2013-10-06 05:17:53.643767699 -0700
+@@ -960,6 +960,15 @@
+ 	if (am_parent) {
+ 		pcap_cache_reload(ev, msg_ctx, &reload_pcap_change_notify);
+ 	}
++	/*
++	 * Reload the tokens so that the shares stuff works properly
++	 */
++	DEBUG(10, ("Calling reload_tokens\n"));
++	reload_tokens();
++	/*
++	 * Recheck the RO status of all shares ...
++	 */
++	reset_ro_all_shares();
+ }
+ 
+ void smbd_setup_sig_hup_handler(struct tevent_context *ev,
