@@ -29,5 +29,5 @@ CORGI_8497_allocation_roundup_size.patch
 no_default_creator_group.patch
 bug_9747_when_creating_a_directory_samba_allows_inherited_bit_to_slip_through.patch
 posix_acl_no_creator_group.patch
-tbg-full-reload_tokens.patch
+tbg-full-reload_tokens.patch tbg-full-reload_tokens.patch
 share-sec-change.patch
