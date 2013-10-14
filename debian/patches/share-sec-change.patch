@@ -69,71 +69,13 @@
  {
  	const struct security_token *token = conn->session_info->security_token;
  
+ void smbd_setup_sig_hup_handler(struct tevent_context *ev,
 --- samba-3.6.9/source3/smbd/server.c	2012-10-29 02:05:46.000000000 -0700
-+++ tbg-samba-3.6.9/source3/smbd/server.c	2013-09-18 08:00:24.663032082 -0700
-@@ -28,6 +28,7 @@
- #include "smbd/globals.h"
- #include "registry/reg_init_full.h"
- #include "libcli/auth/schannel.h"
-+#include "libcli/security/security.h"
- #include "secrets.h"
- #include "memcache.h"
- #include "ctdbd_conn.h"
-@@ -156,6 +157,184 @@
++++ tbg-samba-3.6.9/source3/smbd/server.c	2013-10-12 14:24:23.290792435 -0700
+@@ -156,6 +156,91 @@
  	if(am_parent) kill(0,SIGTERM);
  }
  
-+/*
-+ * Process a share_security_changed message.
-+ */
-+static void reset_read_only(connection_struct *conn)
-+{
-+	struct vuid_cache_entry *ent;
-+	user_struct *vuser;
-+	const struct auth_serversupplied_info *session_info = NULL;
-+	int i = 0;
-+	bool saved_flag;
-+
-+	/*
-+	 * Set READ_ONLY off so that is_share_read_only_for_token works.
-+	 */
-+	saved_flag = conn->read_only;  /* Need to save this though */
-+	conn->read_only = false; 
-+
-+	/*
-+	 * For each vuid check if it should be RO ... this gets jammed into
-+	 * the conn read_only flag when we switch to that user.
-+	 */
-+	for (i = 0; i < VUID_CACHE_SIZE; i++) {
-+		bool read_only = false;
-+
-+		if (conn->vuid_cache.array[i].vuid == UID_FIELD_INVALID)
-+			continue;
-+
-+		vuser = get_valid_user_struct(conn->sconn,
-+					      conn->vuid_cache.array[i].vuid);
-+		session_info = vuser ? vuser->session_info : conn->session_info;
-+
-+		read_only = is_share_read_only_for_token(
-+					session_info->unix_name,
-+					session_info->info3->base.domain.string,
-+					session_info->security_token,
-+					conn);
-+		if (!read_only &&
-+		    !share_access_check(session_info->security_token,
-+					lp_servicename(conn->params->service),
-+					FILE_WRITE_DATA,
-+					NULL))
-+			read_only = true;
-+
-+		conn->vuid_cache.array[i].read_only = read_only;
-+		DEBUG(10, ("Set share for %s to RO = %d\n", 
-+			session_info->unix_name, read_only));
-+	}
-+
-+	conn->read_only = saved_flag;
-+}
-+
 +static void smb_share_security_changed(struct messaging_context *msg,
 +				       void *private_data,
 +				       uint32_t msg_type,
@@ -219,6 +161,117 @@
 +	TALLOC_FREE(sharename);
 +}
 +
+ /****************************************************************************
+  Process a sam sync message - not sure whether to do this here or
+  somewhere else.
+@@ -502,6 +587,10 @@
+ 		smbd_setup_sig_term_handler();
+ 		smbd_setup_sig_hup_handler(server_event_context(),
+ 					   server_messaging_context());
++		/*
++		 * Setup sig_usr2 so we can reload tokens when asked.
++		 */
++		smbd_setup_sig_usr2_handler();
+ 
+ 		if (!serverid_register(procid_self(),
+ 				       FLAG_MSG_GENERAL|FLAG_MSG_SMBD
+@@ -774,6 +863,8 @@
+ 	messaging_register(msg_ctx, NULL, MSG_DEBUG, smbd_msg_debug);
+ 	messaging_register(msg_ctx, server_event_context(), MSG_PRINTER_PCAP,
+ 			   smb_pcap_updated);
++	messaging_register(msg_ctx, NULL, MSG_SMB_SHARE_SEC_CHANGED,
++			   smb_share_security_changed);
+ 	brl_register_msgs(msg_ctx);
+ 
+ 	msg_idmap_register_msgs(msg_ctx);
+@@ -1002,8 +1093,8 @@
+ #endif
+ 
+ #if defined(SIGUSR2)
+-	/* We are no longer interested in USR2 */
+-	BlockSignals(True,SIGUSR2);
++	/* We are interested in USR2 for reloading tokens */
++	BlockSignals(False, SIGUSR2);
+ #endif
+ 
+ 	/* POSIX demands that signals are inherited. If the invoking process has
+@@ -1125,6 +1216,11 @@
+ 	smbd_setup_sig_hup_handler(smbd_event_context(),
+ 				   smbd_server_conn->msg_ctx);
+ 
++	/*
++	 * Setup sig_usr2 so we can reload tokens when asked.
++	 */
++	smbd_setup_sig_usr2_handler();
++
+ 	/* Setup all the TDB's - including CLEAR_IF_FIRST tdb's. */
+ 
+ 	if (smbd_memcache() == NULL) {
+--- samba-3.6.9/source3/smbd/process.c	2012-10-29 02:05:46.000000000 -0700
++++ tbg-samba-3.6.9/source3/smbd/process.c	2013-10-12 11:59:50.990563494 -0700
+@@ -35,6 +35,7 @@
+ #include "smbprofile.h"
+ #include "rpc_server/spoolss/srv_spoolss_nt.h"
+ #include "libsmb/libsmb.h"
++#include "libcli/security/security.h"
+ 
+ extern bool global_machine_password_needs_changing;
+ 
+@@ -945,6 +946,99 @@
+ 	}
+ }
+ 
++/*
++ * Process a share_security_changed message.
++ */
++void reset_read_only(connection_struct *conn)
++{
++	struct vuid_cache_entry *ent;
++	user_struct *vuser;
++	const struct auth_serversupplied_info *session_info = NULL;
++	int i = 0;
++	bool saved_flag;
++
++	/*
++	 * Set READ_ONLY off so that is_share_read_only_for_token works.
++	 */
++	saved_flag = conn->read_only;  /* Need to save this though */
++	conn->read_only = false; 
++
++	/*
++	 * For each vuid check if it should be RO ... this gets jammed into
++	 * the conn read_only flag when we switch to that user.
++	 */
++	for (i = 0; i < VUID_CACHE_SIZE; i++) {
++		bool read_only = false;
++
++		if (conn->vuid_cache.array[i].vuid == UID_FIELD_INVALID)
++			continue;
++
++		vuser = get_valid_user_struct(conn->sconn,
++					      conn->vuid_cache.array[i].vuid);
++		session_info = vuser ? vuser->session_info : conn->session_info;
++
++		read_only = is_share_read_only_for_token(
++					session_info->unix_name,
++					session_info->info3->base.domain.string,
++					session_info->security_token,
++					conn);
++		if (!read_only &&
++		    !share_access_check(session_info->security_token,
++					lp_servicename(conn->params->service),
++					FILE_WRITE_DATA,
++					NULL))
++			read_only = true;
++
++		conn->vuid_cache.array[i].read_only = read_only;
++		DEBUG(10, ("Set share for %s to RO = %d\n", 
++			session_info->unix_name, read_only));
++	}
++
++	conn->read_only = saved_flag;
++}
++
 +/*
 + * Designed to be called from the sighup handler ... iterate through the shares
 + * and call reset_read_only on them.
@@ -261,21 +314,10 @@
 +	}
 +}
 +
- /****************************************************************************
-  Process a sam sync message - not sure whether to do this here or
-  somewhere else.
-@@ -774,6 +957,8 @@
- 	messaging_register(msg_ctx, NULL, MSG_DEBUG, smbd_msg_debug);
- 	messaging_register(msg_ctx, server_event_context(), MSG_PRINTER_PCAP,
- 			   smb_pcap_updated);
-+	messaging_register(msg_ctx, NULL, MSG_SMB_SHARE_SEC_CHANGED,
-+			   smb_share_security_changed);
- 	brl_register_msgs(msg_ctx);
- 
- 	msg_idmap_register_msgs(msg_ctx);
---- samba-3.6.9/source3/smbd/process.c	2012-10-29 02:05:46.000000000 -0700
-+++ tbg-samba-3.6.9/source3/smbd/process.c	2013-10-06 05:17:53.643767699 -0700
-@@ -960,6 +960,15 @@
+ static void smbd_sig_hup_handler(struct tevent_context *ev,
+ 				  struct tevent_signal *se,
+ 				  int signum,
+@@ -960,6 +1054,15 @@
  	if (am_parent) {
  		pcap_cache_reload(ev, msg_ctx, &reload_pcap_change_notify);
  	}
@@ -291,3 +333,40 @@
  }
  
  void smbd_setup_sig_hup_handler(struct tevent_context *ev,
+@@ -974,6 +1077,36 @@
+ 	}
+ }
+ 
++/*
++ * Handle a SIGUSR2 ... we refresh everyone's token so that any group changes
++ * will affect them for future opens.
++ */
++static void smbd_sig_usr2_handler(struct tevent_context *ev,
++				  struct tevent_signal *se,
++				  int signum,
++				  int count,
++				  void *siginfo,
++				  void *private_data)
++{
++
++	DEBUG(10, ("Calling reload_tokens\n"));
++	reload_tokens();
++}
++
++void smbd_setup_sig_usr2_handler(void)
++{
++	struct tevent_signal *se;
++
++	se = tevent_add_signal(smbd_event_context(),
++			       smbd_event_context(),
++			       SIGUSR2, 0,
++			       smbd_sig_usr2_handler,
++			       NULL);
++	if (!se) {
++		exit_server("failed to setup SIGUSR2 handler");
++	}
++}
++
+ static NTSTATUS smbd_server_connection_loop_once(struct smbd_server_connection *conn)
+ {
+ 	int timeout;
