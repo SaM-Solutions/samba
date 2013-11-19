@@ -1,6 +1,12 @@
-samba (2:3.6.6-6.8) UNRELEASED; urgency=low
+samba (2:3.6.6-6.9) unstable; urgency=low
 
-  * New version of patches to make permission changes apply instantly rather
+  * Updated patch to make permission changes apply instantly rather than requiring the user to disconnect from the share
+
+ -- Denis Valoha <d.valoha@sam-solutions.com>  Tue, 19 Nov 2013 14:43:55 +0300
+
+samba (2:3.6.6-6.8) unstable; urgency=low
+
+  * New version of patches to make permission uchanges apply instantly rather
     than requiring the user to disconnect from the share.
 
  -- Aleh Suprunovich <a.suprunovich@sam-solutions.com>  Mon, 14 Oct 2013 08:55:55 +0300
