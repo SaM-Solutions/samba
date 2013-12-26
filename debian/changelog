@@ -1,8 +1,14 @@
+samba (2:3.6.6-6.11) unstable; urgency=low
+
+  * Patch added: Debian Security CVE-2013-4408
+
+ -- Eugene Lavnikevich <e.lavnikevich@sam-solutions.com>  Thu, 26 Dec 2013 18:56:00 +0300
+
 samba (2:3.6.6-6.10) unstable; urgency=low
 
   * Patch updated: Permissions change from "No access" to "Read Only" for mapped share
 
- -- Eugene Lavnikevich <e.lavnikevich@sam-solutions.com>  Tue, 26 Dec 2013 18:26:00 +0300
+ -- Eugene Lavnikevich <e.lavnikevich@sam-solutions.com>  Thu, 26 Dec 2013 18:26:00 +0300
 
 samba (2:3.6.6-6.9) unstable; urgency=low
 
