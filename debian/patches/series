@@ -32,3 +32,4 @@ posix_acl_no_creator_group.patch
 tbg-full-reload_tokens.patch
 share-sec-change.patch
 security-CVE-2013-4408.patch
+security-CVE-2013-4475.patch

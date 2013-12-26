@@ -1,3 +1,9 @@
+samba (2:3.6.6-6.12) unstable; urgency=low
+
+  * Patch added: Debian Security CVE-2013-4475
+
+ -- Eugene Lavnikevich <e.lavnikevich@sam-solutions.com>  Thu, 26 Dec 2013 19:16:00 +0300
+
 samba (2:3.6.6-6.11) unstable; urgency=low
 
   * Patch added: Debian Security CVE-2013-4408
