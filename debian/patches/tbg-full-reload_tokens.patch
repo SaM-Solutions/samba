@@ -8,9 +8,88 @@
  	       $(MANGLE_OBJ) @VFS_STATIC@
  
  SMBD_OBJ_BASE = $(PARAM_WITHOUT_REG_OBJ) $(SMBD_OBJ_SRV) $(LIBSMB_OBJ) \
+--- samba-3.6.9/source3/auth/proto.h	2012-10-29 02:05:46.000000000 -0700
++++ tbg-samba-3.6.9/source3/auth/proto.h	2013-08-09 06:36:21.602088044 -0700
+@@ -131,6 +131,7 @@
+                                       const char *smb_name,
+                                       const char *client_domain,
+                                       DATA_BLOB lm_resp, DATA_BLOB nt_resp);
++NTSTATUS log_nt_token(struct security_token *token);
+ bool make_user_info_guest(struct auth_usersupplied_info **user_info) ;
+ struct samu;
+ NTSTATUS make_server_info_sam(struct auth_serversupplied_info **server_info,
+--- samba-3.6.9/source3/auth/auth_util.c	2012-10-29 02:05:46.000000000 -0700
++++ tbg-samba-3.6.9/source3/auth/auth_util.c	2013-08-11 09:49:39.970440565 -0700
+@@ -395,7 +395,7 @@
+ 	return NT_STATUS_IS_OK(nt_status) ? True : False;
+ }
+ 
+-static NTSTATUS log_nt_token(struct security_token *token)
++NTSTATUS log_nt_token(struct security_token *token)
+ {
+ 	TALLOC_CTX *frame = talloc_stackframe();
+ 	char *command;
+--- samba-3.6.9/source3/auth/token_util.c	2012-10-29 02:05:46.000000000 -0700
++++ tbg-samba-3.6.9/source3/auth/token_util.c	2013-12-14 07:19:45.288313381 -0800
+@@ -565,6 +565,8 @@
+ 	enum lsa_SidType type;
+ 	gid_t *gids;
+ 	struct dom_sid *group_sids;
++	bool default_group_sid_valid = False;
++	struct dom_sid default_group_sid;
+ 	struct dom_sid unix_group_sid;
+ 	uint32_t num_group_sids;
+ 	uint32_t num_gids;
+@@ -585,6 +587,7 @@
+ 	if (sid_check_is_in_our_domain(&user_sid)) {
+ 		bool ret;
+ 		uint32_t pdb_num_group_sids;
++
+ 		/* This is a passdb user, so ask passdb */
+ 
+ 		struct samu *sam_acct = NULL;
+@@ -622,6 +625,9 @@
+ 
+ 		*gid = gids[0];
+ 
++		default_group_sid_valid = True;
++		sid_copy(&default_group_sid, sam_acct->group_sid);
++
+ 		/* Ensure we're returning the found_username on the right context. */
+ 		*found_username = talloc_strdup(mem_ctx,
+ 						pdb_get_username(sam_acct));
+@@ -780,6 +786,28 @@
+ 		}
+ 	}
+ 
++	/*
++	 * Add the group SID to the front since pdb_enum etc didn't, but only
++	 * if it is not there.
++	 */
++	if (default_group_sid_valid) {
++		DEBUG(10, ("Adding default group SID: %s\n",
++			dom_sid_string(tmp_ctx, &default_group_sid)));
++		group_sids = talloc_realloc(mem_ctx, group_sids, 
++					struct dom_sid, num_group_sids + 1);
++		if (!group_sids) {
++			DEBUG(10, ("talloc_realloc failed for group sids\n"));
++			result = NT_STATUS_NO_SUCH_USER;
++			goto done;
++		}
++
++		for (i = num_group_sids; i > 0; i--)
++			sid_copy(&group_sids[i], &group_sids[i - 1]);
++
++		sid_copy(&group_sids[0], &default_group_sid);
++		num_group_sids++;
++	}
++
+ 	/* Ensure we're creating the nt_token on the right context. */
+ 	*token = create_local_nt_token(mem_ctx, &user_sid,
+ 				       is_guest, num_group_sids, group_sids);
 --- samba-3.6.9/source3/auth/auth_reload.c	1969-12-31 16:00:00.000000000 -0800
-+++ tbg-samba-3.6.9/source3/auth/auth_reload.c	2013-08-10 21:31:16.281709654 -0700
-@@ -0,0 +1,313 @@
++++ tbg-samba-3.6.9/source3/auth/auth_reload.c	2013-12-14 07:32:02.512251328 -0800
+@@ -0,0 +1,371 @@
 +/*
 +   Unix SMB/CIFS implementation.
 +   Token Reload functions
@@ -125,6 +204,7 @@
 +	NTSTATUS res;
 +	struct security_unix_token *utok = NULL;
 +	struct security_token *token = NULL;
++	struct extra_auth_info extra;
 +	char *username = NULL;
 +	struct dom_sid tmp_sid;
 +	int ngroups = 0;
@@ -151,31 +231,48 @@
 +			      utok->ngroups,
 +			      utok->groups);
 +
-+	if (!get_group_sids(user->session_info,
++	DEBUG(10, ("info3.rid = %X, info3.primary_gid = %X\n",
++		user->session_info->info3->base.rid,
++		user->session_info->info3->base.primary_gid));
++
++	/*
++	 * Only do this if we are joined to the domain
++	 */
++	if (lp_server_role() == ROLE_DOMAIN_MEMBER) {
++		if (!get_group_sids(user->session_info,
 +				&user->session_info->security_token->sids[0],
 +				&ngroups,
 +				&groups)) {
-+		DEBUG(10, ("Failed to get groups ...\n"));
-+	}
++			DEBUG(10, ("Failed to get groups ...\n"));
++		}
 +
-+	DEBUG(10, ("Groups = %u\n", ngroups));
-+
-+	/*
-+	 * It is not clear we need to initgroups, especially since it
-+	 * will change the groups in play and we might screw up any
-+	 * change to user change back to root pair.
-+	 */
-+
-+	token = create_local_nt_token(user->session_info,
++		token = create_local_nt_token(user->session_info,
 +				&user->session_info->security_token->sids[0],
 +				user->session_info->guest,
 +				ngroups,
 +				groups);
 +
-+	if (!token) {
-+		DEBUG(10, ("Unable to create token for [%s]: ENOMEM. Skipping.\n",
-+			user->session_info->unix_name));
-+		return False;
++		if (!token) {
++			DEBUG(10, ("Unable to create token for [%s]: ENOMEM. Skipping.\n",
++				user->session_info->unix_name));
++			return False;
++		}
++	}
++	else {
++		/* Recreate the token ... */
++		res = create_token_from_username(user->session_info,
++						user->session_info->unix_name,
++						user->session_info->guest,
++						&utok->uid,
++						&utok->gid,
++						&username,
++						&token);
++
++		if (!NT_STATUS_IS_OK(res)) {
++			DEBUG(0, ("Unable to create token from username: %s (%s)\n",
++				user->session_info->unix_name, nt_errstr(res)));
++			return False;
++		}
 +	}
 +
 +	TALLOC_FREE(username); /* Don't need this ... */
@@ -189,7 +286,6 @@
 +
 +	/*
 +	 * Now, add the UNIX groups, because we deleted all groups above.
-+	 * We do this first because getgroups_unix_user overwrites groups.
 +	 */
 +	getgroups_unix_user(user->session_info,
 +			    user->session_info->unix_name,
@@ -268,6 +364,40 @@
 +}
 +
 +/*
++ * Handle a single connection struct ... fix things up ...
++ */
++void handle_conn(struct smbd_server_connection *srv_conn,
++		 connection_struct *conn)
++{
++	user_struct *user = NULL;
++	int i = 0;
++
++	user = get_valid_user_struct(srv_conn, conn->vuid);
++
++	if (!user->session_info) {
++		DEBUG(10, ("No session info for vuid %u, "
++				"ignoring!\n", conn->vuid));
++		return;
++	}
++
++	TALLOC_FREE(conn->session_info->security_token);
++	conn->session_info->security_token = dup_nt_token(conn,
++					user->session_info->security_token);
++	TALLOC_FREE(conn->session_info->utok.groups);
++	conn->session_info->utok.groups = talloc_array(conn,
++					gid_t, 
++					user->session_info->utok.ngroups);
++	if (!conn->session_info->utok.groups) {
++		DEBUG(0, ("Could not allocate space for groups\n"));
++			exit_server("reload_token allocation error");
++	}
++	conn->session_info->utok.ngroups = user->session_info->utok.ngroups;
++	for (i = 0; i < conn->session_info->utok.ngroups; i++)
++		conn->session_info->utok.groups[i] = 
++			user->session_info->utok.groups[i];
++}
++
++/*
 + * Reload all tokens. We need to reload the tokens for all authenticated users
 + * and then copy these tokens into the SMB1 tcons, if any.
 + *
@@ -288,7 +418,7 @@
 +	struct smbd_server_connection *srv_conn = smbd_server_conn;
 +	user_struct *user = NULL;
 +
-+	DEBUG(10, ("Reloading tokens for all validated users\n"));
++	DEBUG(10, ("Reloading tokens for all validated users, SMB1 and SMB2\n"));
 +	/*
 +	 * A user validated via SMB2 shows up in smb1.sessions.validated users
 +	 */
@@ -300,7 +430,7 @@
 +
 +	/*
 +	 * Now take care of those tokens copied to TCON structures in
-+	 * SMB1 cases ...
++	 * SMB1 cases ... or in the SMB2 case the compat_
 +	 */
 +	if (!srv_conn->using_smb2) {
 +		connection_struct *conn;
@@ -309,39 +439,25 @@
 +		for (conn = srv_conn->smb1.tcons.Connections;
 +			conn;
 +			conn = conn->next) {
-+			user = get_valid_user_struct(srv_conn, conn->vuid);
++			handle_conn(srv_conn, conn);
++		}
++	}
++	else {
++		struct smbd_smb2_session *sess;
 +
-+			if (!user->session_info) {
-+				DEBUG(10, ("No session info for vuid %u, "
-+					"ignoring!\n", conn->vuid));
-+				continue;
++		for (sess = srv_conn->smb2.sessions.list; 
++			sess;
++			sess = sess->next) {
++			struct smbd_smb2_tcon *tcon;
++
++			DEBUG(10, ("Session %p being handled ...\n", sess));
++			for (tcon = sess->tcons.list;
++				tcon;
++				tcon = tcon->next) {
++				DEBUG(10, ("tcon %p being handled ...\n",
++					tcon));
++				handle_conn(srv_conn, tcon->compat_conn);
 +			}
-+
-+			TALLOC_FREE(conn->session_info->security_token);
-+			conn->session_info->security_token = 
-+				dup_nt_token(conn,
-+					user->session_info->security_token);
 +		}
 +	}
 +}
---- samba-3.6.9/source3/auth/proto.h	2012-10-29 02:05:46.000000000 -0700
-+++ tbg-samba-3.6.9/source3/auth/proto.h	2013-08-09 06:36:21.602088044 -0700
-@@ -131,6 +131,7 @@
-                                       const char *smb_name,
-                                       const char *client_domain,
-                                       DATA_BLOB lm_resp, DATA_BLOB nt_resp);
-+NTSTATUS log_nt_token(struct security_token *token);
- bool make_user_info_guest(struct auth_usersupplied_info **user_info) ;
- struct samu;
- NTSTATUS make_server_info_sam(struct auth_serversupplied_info **server_info,
---- samba-3.6.9/source3/auth/auth_util.c	2012-10-29 02:05:46.000000000 -0700
-+++ tbg-samba-3.6.9/source3/auth/auth_util.c	2013-08-11 09:49:39.970440565 -0700
-@@ -395,7 +395,7 @@
- 	return NT_STATUS_IS_OK(nt_status) ? True : False;
- }
- 
--static NTSTATUS log_nt_token(struct security_token *token)
-+NTSTATUS log_nt_token(struct security_token *token)
- {
- 	TALLOC_CTX *frame = talloc_stackframe();
- 	char *command;

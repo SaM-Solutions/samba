@@ -208,7 +208,7 @@
  
  	if (smbd_memcache() == NULL) {
 --- samba-3.6.9/source3/smbd/process.c	2012-10-29 02:05:46.000000000 -0700
-+++ test2-samba-3.6.9/source3/smbd/process.c	2013-11-13 08:01:41.001361144 -0800
++++ tbg-samba-3.6.9/source3/smbd/process.c	2013-12-17 05:36:55.839111157 -0800
 @@ -35,6 +35,7 @@
  #include "smbprofile.h"
  #include "rpc_server/spoolss/srv_spoolss_nt.h"
@@ -217,7 +217,7 @@
  
  extern bool global_machine_password_needs_changing;
  
-@@ -945,6 +946,112 @@
+@@ -945,6 +946,119 @@
  	}
  }
  
@@ -272,6 +272,7 @@
 +
 +	conn->read_only = saved_flag;
 +
++	DEBUG(10, ("share_access = %0x0p\n", conn->share_access));
 +	/*
 +	 * Now check if the user should have access at all, since they 
 +	 * might have been removed from certain lists.
@@ -287,7 +288,7 @@
 +
 +/*
 + * Designed to be called from the sighup handler ... iterate through the shares
-+ * and call reset_read_only on them.
++ * and recalculate share access mask and call reset_read_only on them.
 + */
 +void reset_ro_all_shares(void)
 +{
@@ -304,6 +305,10 @@
 +			for (smb2_tcon = session->tcons.list;
 +			     smb2_tcon != NULL;
 +			     smb2_tcon = smb2_tcon->next) {
++				struct connection_struct *conn =
++						smb2_tcon->compat_conn;
++				create_share_access_mask(conn,
++						conn->params->service);
 +				/*
 +				 * It should not be read only since
 +				 * We are using share-level perms.
@@ -318,6 +323,8 @@
 +		for (conn = sconn->smb1.tcons.Connections;
 +		     conn != NULL;
 +		     conn = conn->next) {
++
++			create_share_access_mask(conn, conn->params->service);
 +			/*
 +			 * It should not be read only since
 +			 * We are using share-level perms.
@@ -330,7 +337,7 @@
  static void smbd_sig_hup_handler(struct tevent_context *ev,
  				  struct tevent_signal *se,
  				  int signum,
-@@ -960,6 +1067,15 @@
+@@ -960,6 +1074,15 @@
  	if (am_parent) {
  		pcap_cache_reload(ev, msg_ctx, &reload_pcap_change_notify);
  	}
@@ -346,7 +353,7 @@
  }
  
  void smbd_setup_sig_hup_handler(struct tevent_context *ev,
-@@ -974,6 +1090,36 @@
+@@ -974,6 +1097,36 @@
  	}
  }
  

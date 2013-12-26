@@ -1,3 +1,9 @@
+samba (2:3.6.6-6.10) unstable; urgency=low
+
+  * Patch updated: Permissions change from "No access" to "Read Only" for mapped share
+
+ -- Eugene Lavnikevich <e.lavnikevich@sam-solutions.com>  Tue, 26 Dec 2013 18:26:00 +0300
+
 samba (2:3.6.6-6.9) unstable; urgency=low
 
   * Updated patch to make permission changes apply instantly rather than requiring the user to disconnect from the share
